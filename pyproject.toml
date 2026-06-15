@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ableton-asd-parser"
+version = "0.1.0"
+description = "Read-only parser and CLI for Ableton Live .asd analysis sidecar files"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["ableton", "asd", "audio", "warp", "live"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Typing :: Typed",
+]
+
+[project.scripts]
+asd-dump = "ableton_asd_parser.cli:main"
+
+[project.urls]
+Repository = "https://github.com/QaAudio/ableton-asd-parser"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ableton_asd_parser*"]
+
+[tool.setuptools.package-data]
+ableton_asd_parser = ["py.typed"]
