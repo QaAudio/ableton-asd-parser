@@ -57,7 +57,11 @@ class RealFixtureTests(unittest.TestCase):
                 self.assertEqual(len(info.overview_levels), entry["overview_levels"])
                 self.assertGreaterEqual(len(info.schema_types), entry["schema_types_min"])
                 self.assertIn("SampleData", info.schema_types)
-                self.assertIn("WarpMarker", info.schema_types)
+                self.assertTrue(info.structurally_parsed)
+                self.assertEqual(
+                    set(info.property_names),
+                    {member.name for schema_type in info.schema for member in schema_type.members},
+                )
 
                 if entry.get("implied_tempo_bpm") is not None:
                     tempo = info.implied_tempo_bpm()

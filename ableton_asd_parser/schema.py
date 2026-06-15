@@ -1,120 +1,128 @@
 from __future__ import annotations
 
-import re
-import struct
+from .reader import ByteReader
+from .schema_types import SchemaGraph, SchemaMember, SchemaType, TypeRef
 
-from .model import OverviewLevel
-
-_KNOWN_TYPES = (
-    b"SampleData",
-    b"RemoteableDouble",
-    b"RemoteableBool",
-    b"RemoteableInt",
-    b"RemoteableEnum",
-    b"RemoteableList",
-    b"RemoteableArray",
-    b"RemoteableTimeSignature",
-    b"UserFloat",
-    b"WarpMarker",
-    b"OnsetArray",
-    b"OnsetEvent",
-    b"OnSets",
-    b"AufTaktData",
-    b"SampleOverView",
-    b"SampleOverViewLevel",
-    b"List<SampleOverViewLevel>",
-    b"TimeSignatureNumerator",
-    b"TimeSignatureDenominator",
-)
+_MAX_NAME_LEN = 64
+_MAX_MEMBERS = 256
 
 
-def scan_schema_types(data: bytes) -> list[str]:
-    found: list[str] = []
-    seen: set[str] = set()
-    for token in _KNOWN_TYPES:
-        index = 0
-        while True:
-            index = data.find(token, index)
-            if index < 0:
-                break
-            name = token.decode("ascii")
-            if name not in seen:
-                seen.add(name)
-                found.append(name)
-            index += len(token)
-    return sorted(found, key=lambda s: data.find(s.encode("ascii")))
+def _looks_like_type_name(data: bytes, pos: int) -> bool:
+    if pos + 2 > len(data) or data[pos] != 0:
+        return False
+    length = data[pos + 1]
+    if length < 1 or length > _MAX_NAME_LEN:
+        return False
+    end = pos + 2 + length
+    if end > len(data):
+        return False
+    return all(32 <= byte < 127 for byte in data[pos + 2 : end])
 
 
-def scan_property_names(data: bytes) -> list[str]:
-    names: set[str] = set()
-    for index in range(0, len(data) - 8):
-        length = struct.unpack_from("<I", data, index)[0]
-        if length < 1 or length > 48:
-            continue
-        end = index + 4 + length * 2
-        if end > len(data):
-            continue
-        raw = data[index + 4 : end]
-        if len(raw) % 2:
-            continue
-        try:
-            text = raw.decode("utf-16-le")
-        except UnicodeDecodeError:
-            continue
-        text = text.rstrip("\x00")
-        if not text or len(text) != length:
-            continue
-        if not text[0].isupper():
-            continue
-        if not all(ch.isalnum() or ch == "_" for ch in text):
-            continue
-        names.add(text)
-    return sorted(names)
+def _read_type_name(reader: ByteReader) -> str:
+    if reader.u8() != 0:
+        raise ValueError("expected 0x00 type-name prefix")
+    return reader.ascii_pstr()
 
 
-def parse_overview_levels(data: bytes) -> list[OverviewLevel]:
-    """Best-effort decode of `SampleOverViewLevel` float payloads."""
-    tag = b"SampleOverViewLevel"
-    levels: list[OverviewLevel] = []
-    search_from = 0
+def _read_type_ref(reader: ByteReader) -> TypeRef:
+    tag = reader.u8()
+    if tag == 0:
+        return TypeRef(name=reader.ascii_pstr())
+    return TypeRef(primitive=tag)
 
-    while True:
-        index = data.find(tag, search_from)
-        if index < 0:
-            break
-        search_from = index + len(tag)
 
-        cursor = index + len(tag)
-        if cursor + 8 > len(data):
-            continue
+def _read_member(reader: ByteReader) -> SchemaMember:
+    char_count = reader.u32()
+    if char_count < 1 or char_count > _MAX_NAME_LEN:
+        raise ValueError(f"invalid member name length: {char_count}")
+    name = reader.bytes(char_count * 2).decode("utf-16-le")
+    if not name or not (name[0].isalpha() or name[0] == "_"):
+        raise ValueError(f"implausible member name: {name!r}")
+    return SchemaMember(name=name, type_ref=_read_type_ref(reader))
 
-        count, byte_len = struct.unpack_from("<II", data, cursor)
-        cursor += 8
 
-        if count not in (1, 2) or byte_len == 0 or byte_len % 4 != 0 or byte_len > 4096:
-            continue
-        if cursor + byte_len > len(data):
-            continue
-
-        payload = data[cursor : cursor + byte_len]
-        values = struct.unpack(f"<{byte_len // 4}f", payload)
-
-        if not values:
-            continue
-        if not all(-1.5 <= value <= 1.5 for value in values):
-            continue
-
-        levels.append(
-            OverviewLevel(
-                offset=index,
-                sample_count=len(values),
-                values=tuple(float(v) for v in values),
+def _try_read_type_def(data: bytes, pos: int) -> SchemaType | None:
+    """Parse one type definition at `pos`, or return None if it is not one."""
+    if not _looks_like_type_name(data, pos):
+        return None
+    reader = ByteReader(data, pos)
+    try:
+        name = _read_type_name(reader)
+        raw_count = reader.u32()
+        signed = raw_count - 0x1_0000_0000 if raw_count >= 0x8000_0000 else raw_count
+        if signed < 0:
+            # Collection marker (e.g. List<...>, RemoteableList/Array): no members.
+            return SchemaType(
+                name=name,
+                members=(),
+                offset=pos,
+                is_collection=True,
+                raw_count=raw_count,
             )
-        )
+        if signed > _MAX_MEMBERS:
+            return None
+        members = tuple(_read_member(reader) for _ in range(signed))
+    except ValueError:
+        return None
+    return SchemaType(name=name, members=members, offset=pos, raw_count=raw_count)
 
-    return levels
+
+def _consume_type_def(data: bytes, pos: int) -> tuple[SchemaType, int] | None:
+    schema_type = _try_read_type_def(data, pos)
+    if schema_type is None:
+        return None
+    reader = ByteReader(data, pos)
+    _read_type_name(reader)
+    reader.u32()
+    if not schema_type.is_collection:
+        for _ in schema_type.members:
+            _read_member(reader)
+    return schema_type, reader.pos
 
 
-def scan_ascii_strings(data: bytes, min_length: int = 6) -> list[str]:
-    pattern = re.compile(rb"[\x20-\x7e]{%d,}" % min_length)
-    return sorted({match.group().decode("ascii") for match in pattern.finditer(data)})
+def parse_schema(data: bytes, schema_start: int) -> SchemaGraph:
+    """Parse the self-describing ASD schema dictionary.
+
+    The schema is a version header (``00 <len> SampleData <u32 version>``)
+    followed by a stream of type definitions. Parsing stops at the first byte
+    that is not a valid type definition; that offset is the instance-data start
+    (``schema_end``).
+    """
+    graph = SchemaGraph(schema_start=schema_start)
+    pos = schema_start
+
+    if _looks_like_type_name(data, pos):
+        header = ByteReader(data, pos)
+        try:
+            root_name = _read_type_name(header)
+            version = header.u32()
+            # A header is distinguished from a real type def: the bytes that
+            # follow the version are themselves another type-name prefix.
+            if _looks_like_type_name(data, header.pos):
+                graph.root = root_name
+                graph.version = version
+                pos = header.pos
+        except ValueError:
+            pass
+
+    while pos < len(data):
+        consumed = _consume_type_def(data, pos)
+        if consumed is None:
+            break
+        schema_type, pos = consumed
+        if schema_type.name not in graph.types:
+            graph.types[schema_type.name] = schema_type
+
+    graph.schema_end = pos
+    if graph.root not in graph.types and graph.types:
+        graph.root = next(iter(graph.types))
+    return graph
+
+
+def scan_schema_types(data: bytes, schema_start: int) -> list[str]:
+    return parse_schema(data, schema_start).type_names
+
+
+def scan_property_names(data: bytes, schema_start: int) -> list[str]:
+    return parse_schema(data, schema_start).member_names

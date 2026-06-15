@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .schema_types import SchemaType
+
 
 @dataclass(frozen=True)
 class WarpMarker:
@@ -43,7 +45,10 @@ class AsdFile:
     overview_levels: list[OverviewLevel] = field(default_factory=list)
     schema_types: list[str] = field(default_factory=list)
     property_names: list[str] = field(default_factory=list)
+    schema: list[SchemaType] = field(default_factory=list)
     companion_wav: dict[str, int | float] | None = None
+    structurally_parsed: bool = False
+    parse_warnings: list[str] = field(default_factory=list)
 
     def implied_tempo_bpm(self) -> float | None:
         if len(self.warp_markers) < 2:

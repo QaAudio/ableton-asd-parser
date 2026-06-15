@@ -5,9 +5,9 @@ import wave
 from pathlib import Path
 
 from .header import parse_header
-from .markers import parse_warp_markers
+from .instances import parse_overview_levels_from_instance, parse_warp_markers_from_instance
 from .model import AsdFile
-from .schema import parse_overview_levels, scan_property_names, scan_schema_types
+from .schema import parse_schema
 
 
 def read_wav_info(path: str | Path) -> dict[str, int | float]:
@@ -26,10 +26,15 @@ def read_wav_info(path: str | Path) -> dict[str, int | float]:
 def parse_asd(path: str | Path, *, wav_path: str | Path | None = None) -> AsdFile:
     data = Path(path).read_bytes()
     header = parse_header(data)
+    graph = parse_schema(data, header.schema_start)
 
     companion: dict[str, int | float] | None = None
     if wav_path is not None:
         companion = read_wav_info(wav_path)
+
+    schema_types = list(graph.type_names)
+    property_names = list(graph.member_names)
+    schema = list(graph.types.values())
 
     return AsdFile(
         path=str(path),
@@ -42,11 +47,14 @@ def parse_asd(path: str | Path, *, wav_path: str | Path | None = None) -> AsdFil
         frame_count=header.frame_count,
         overview_bin_count=header.overview_bin_count,
         footer_fields=list(header.footer_fields),
-        warp_markers=parse_warp_markers(data),
-        overview_levels=parse_overview_levels(data),
-        schema_types=scan_schema_types(data),
-        property_names=scan_property_names(data),
+        warp_markers=parse_warp_markers_from_instance(data, graph),
+        overview_levels=parse_overview_levels_from_instance(data, graph),
+        schema_types=schema_types,
+        property_names=property_names,
+        schema=schema,
         companion_wav=companion,
+        structurally_parsed=True,
+        parse_warnings=list(graph.warnings),
     )
 
 
@@ -111,6 +119,12 @@ def format_text(info: AsdFile) -> str:
     if len(info.property_names) > 20:
         lines.append(f"  ... and {len(info.property_names) - 20} more")
 
+    if info.parse_warnings:
+        lines.append("")
+        lines.append(f"[Warnings] ({len(info.parse_warnings)})")
+        for warning in info.parse_warnings[:10]:
+            lines.append(f"  {warning}")
+
     return "\n".join(lines)
 
 
@@ -148,5 +162,7 @@ def format_json(info: AsdFile) -> str:
         ],
         "schema_types": info.schema_types,
         "property_names": info.property_names,
+        "structurally_parsed": info.structurally_parsed,
+        "parse_warnings": info.parse_warnings,
     }
     return json.dumps(payload, indent=2)

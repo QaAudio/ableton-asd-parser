@@ -18,6 +18,16 @@ class HeaderInfo:
     schema_start: int
 
 
+def _find_schema_start(data: bytes) -> int:
+    """Locate the root `SampleData` schema type definition."""
+    marker = b"\x00\x0aSampleData"
+    index = data.find(marker)
+    if index >= 0:
+        return index
+    fallback = data.find(b"SampleData")
+    return fallback if fallback >= 0 else len(data)
+
+
 def parse_header(data: bytes) -> HeaderInfo:
     if len(data) < 14:
         raise ValueError(f"ASD too small ({len(data)} bytes)")
@@ -32,9 +42,7 @@ def parse_header(data: bytes) -> HeaderInfo:
     magic = f"I/{overview_table_slots}"
 
     reserved, overview_scale = struct.unpack_from("<II", data, 4)
-    schema_start = data.find(b"SampleData")
-    if schema_start < 0:
-        schema_start = len(data)
+    schema_start = _find_schema_start(data)
 
     table_len = overview_table_slots - 2
     if table_len < 1:
